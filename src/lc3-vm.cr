@@ -18,11 +18,12 @@ enum Instruction : UInt16
   LD   # Load
   ST   # Store
   JSR  # Jump register
-  STR  # Store Register
-  RTI  # Unused
-  NOT  # Bitwise not
-  AND  # Bitwise and
-  LDI  # Load indirect
+  AND  # Store Register
+  LDR  # Unused
+  STR  # Bitwise not
+  RTI  # Bitwise and
+  NOT  # Load indirect
+  LDI  # Load register
   STI  # Store indirect
   JMP  # Jump
   RES  # Reserved (Unused)
@@ -51,12 +52,8 @@ enum TrapCode : UInt16
 end
 
 MEMORY                = Array(UInt16).new(UInt16::MAX, 0)
-REGISTER_STORAGE      = Array(UInt16).new(UInt16::MAX, 0)
+REGISTER_STORAGE      = Array(UInt16).new(Register::Count.value, 0)
 PROGRAM_COUNTER_START = 0x3000_u16
-
-macro instruction
-  
-end
 
 def swap16(two_byte : UInt16) : UInt16
   (two_byte << 8) | (two_byte >> 8)
@@ -82,7 +79,7 @@ def read_image_file(filename : String)
 
   while true
     begin
-      twobyte = file.read_bytes(UInt16)
+      twobyte = file.read_bytes(UInt16, IO::ByteFormat::LittleEndian)
     rescue IO::EOFError
       break
     end
@@ -103,55 +100,77 @@ end
 
 def read_memory(address : UInt16) : UInt16
   if address == MemoryMappedRegister::KeyboardStatus.value
-    byte : Char = (STDIN.raw &.read_char).not_nil!
-    if byte == 0
-      MEMORY[MemoryMappedRegister::KeyboardStatus.value] = 1u16 << 15
-      MEMORY[MemoryMappedRegister::KeyboardData.value] = byte.to_u16
+    byte : UInt16 = (STDIN.raw &.read_char).not_nil!.ord.to_u16
+    if byte != 0
+      MEMORY[MemoryMappedRegister::KeyboardStatus.value] = 1_u16 << 15
+      MEMORY[MemoryMappedRegister::KeyboardData.value] = byte
     else
       MEMORY[MemoryMappedRegister::KeyboardStatus.value] = 0
     end
   end
+
   MEMORY[address]
 end
 
-def write_memory(index : UInt16, value : UInt16)
-  MEMORY[index] = value
+def write_memory(address : UInt16, value : UInt16)
+  MEMORY[address] = value
 end
 
-def execute_trap(instruction : UInt16)
+def execute_trap(instruction : UInt16) : Bool
+  output : Char
+  input_charcode : UInt16
+  char_location : UInt16
+
   quit : Bool = false
-  case instruction & 0xFF
-  when Trap::Getc
-    input_char : UInt16 = gets(1).not_nil!.byte_at(0).to_u16
-    REGISTER_STORAGE[Register::R0.value] = input_char
-  when Trap::Out
-    output : Char = REGISTER_STORAGE[Register::R0.value & 0xFF].to_c
+  case TrapCode.new(instruction & 0xFF)
+  when TrapCode::Getc
+    input_charcode = gets(1).not_nil!.byte_at(0).to_u16
+    REGISTER_STORAGE[Register::R0.value] = input_charcode
+  when TrapCode::Out
+    output = REGISTER_STORAGE[Register::R0.value & 0xFF].unsafe_chr
     print(output)
-  when Trap::Puts
-    char_location : UInt16 = REGISTER_STORAGE[Register::R0.value]
+  when TrapCode::Puts
+    char_location = REGISTER_STORAGE[Register::R0.value]
     while MEMORY[char_location] != 0
-      output : Char = (MEMORY[char_location] & 0xFF).to_c
+      output = (MEMORY[char_location] & 0xFF).unsafe_chr
       print(output)
 
       char_location += 1
     end
-    flush()
-  when Trap::In
+    STDOUT.flush
+  when TrapCode::In
     print("Enter a character: ")
-    flush()
+    STDOUT.flush
 
-    input_char : UInt16 = gets(1).not_nil!.byte_at(0).to_u16
-    print(input_char.to_c)
-    flush()
+    input_charcode = gets(1).not_nil!.byte_at(0).to_u16
+    print(input_charcode.unsafe_chr)
+    STDOUT.flush
 
-    REGISTER_STORAGE[Register::R0.value] = input_char
-  when Trap::Putsp
+    REGISTER_STORAGE[Register::R0.value] = input_charcode
+  when TrapCode::Putsp
+    char_location = REGISTER_STORAGE[Register::R0.value]
+    while MEMORY[char_location] != 0
+      output = (MEMORY[char_location] & 0xFF).unsafe_chr
+      print(output)
+
+      charcode_2nd = MEMORY[char_location] >> 8
+      if charcode_2nd != 0
+        print(charcode_2nd.unsafe_chr)
+      end
+
+      char_location += 1
+    end
+    STDOUT.flush
+  when TrapCode::Halt
+    print("HALT")
+    STDOUT.flush
+    quit = true
   end
+
+  quit
 end
 
 def dispatch
-  REGISTER_STORAGE[Register::ProgramCounter.value] = PROGRAM_COUNTER_START
-
   dr : UInt16
   sr : UInt16
   sr1 : UInt16
@@ -160,17 +179,27 @@ def dispatch
   imm5 : UInt16
   base_r : UInt16
   pc_offset : UInt16
+  instruction : UInt16
+  operator : UInt16
+
+  REGISTER_STORAGE[Register::ProgramCounter.value] = PROGRAM_COUNTER_START
 
   running : Bool = true
   while running
-    instruction : UInt16 = read_memory(REGISTER_STORAGE[Register::ProgramCounter.value])
-    operator : UInt16 = instruction >> 12
+    # puts "Bef #{REGISTER_STORAGE[Register::ProgramCounter.value]}"
 
-    case operator
+    instruction = read_memory(REGISTER_STORAGE[Register::ProgramCounter.value])
+    REGISTER_STORAGE[Register::ProgramCounter.value] += 1
+    operator = instruction >> 12
+
+    # puts Instruction.new(instruction)
+    # STDOUT.flush
+
+    case Instruction.new(operator)
     when Instruction::BR
       n_flag : UInt16 = (instruction >> 11) & 0x1
       z_flag : UInt16 = (instruction >> 10) & 0x1
-      p_flag : UInt16 = (instruction >> 19) & 0x1
+      p_flag : UInt16 = (instruction >> 9) & 0x1
 
       pc_offset = sign_extend(instruction & 0x1FF, 9)
 
@@ -215,6 +244,7 @@ def dispatch
       update_flags(dr)
     when Instruction::JMP
       base_r = (instruction >> 6) & 0x7
+
       REGISTER_STORAGE[Register::ProgramCounter.value] = REGISTER_STORAGE[base_r]
     when Instruction::JSR
       REGISTER_STORAGE[Register::R7.value] = REGISTER_STORAGE[Register::ProgramCounter.value]
@@ -236,16 +266,60 @@ def dispatch
       REGISTER_STORAGE[dr] = read_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset)
 
       update_flags(dr)
+    when Instruction::LDI
+      dr = (instruction >> 9) & 0x7
+
+      pc_offset = sign_extend(instruction & 0x1FF, 9)
+
+      REGISTER_STORAGE[dr] = read_memory(read_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset))
+
+      update_flags(dr)
+    when Instruction::LDR
+      dr = (instruction >> 9) & 0x7
+
+      base_r = (instruction >> 6) & 0x7
+
+      offset = sign_extend(instruction & 0x3F, 6)
+
+      REGISTER_STORAGE[dr] = read_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + offset)
+
+      update_flags(dr)
+    when Instruction::LEA
+      dr = (instruction >> 9) & 0x7
+
+      pc_offset = sign_extend(instruction & 0x1FF, 9)
+
+      REGISTER_STORAGE[dr] = REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset
     when Instruction::ST
+      sr = (instruction >> 9) & 0x7
+
+      pc_offset = sign_extend(instruction & 0x1FF, 9)
+
+      write_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset, REGISTER_STORAGE[sr])
+    when Instruction::STI
+      sr = (instruction >> 9) & 0x7
+
+      pc_offset = sign_extend(instruction & 0x1FF, 9)
+
+      write_memory(read_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset), REGISTER_STORAGE[sr])
     when Instruction::STR
+      sr = (instruction >> 9) & 0x7
+
+      base_r = (instruction >> 6) & 0x7
+
+      pc_offset = sign_extend(instruction & 0x3F, 6)
+
+      write_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset, REGISTER_STORAGE[sr])
     when Instruction::TRAP
+      running = !execute_trap(instruction)
     when Instruction::RES
     when Instruction::RTI
     else
       exit
     end
-
-    REGISTER_STORAGE[Register::ProgramCounter.value] += 1
+    if Instruction.new(instruction) != Instruction::BR
+      puts "Instruction #{Instruction.new(instruction)}"
+    end
   end
 end
 
