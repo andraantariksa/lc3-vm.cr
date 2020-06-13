@@ -43,7 +43,7 @@ enum MemoryMappedRegister : UInt16
 end
 
 enum TrapCode : UInt16
-  Getc  = 0x20
+  GetC  = 0x20
   Out   = 0x21
   Puts  = 0x22
   In    = 0x23
@@ -60,7 +60,7 @@ def swap16(two_byte : UInt16) : UInt16
 end
 
 def sign_extend(value : UInt16, bit_count : UInt8)
-  if (value >> (bit_count - 1)) & 1 == 1
+  if (value >> (bit_count - 1)) & 1 != 0
     value |= (0xFFFF << bit_count)
   end
 
@@ -74,12 +74,12 @@ def read_image_file(filename : String)
 
   file = File.open(filename)
 
-  location : UInt16 = file.read_bytes(UInt16, IO::ByteFormat::LittleEndian)
+  location : UInt16 = file.read_bytes(UInt16, IO::ByteFormat::BigEndian)
   twobyte : UInt16
 
   while true
     begin
-      twobyte = file.read_bytes(UInt16, IO::ByteFormat::LittleEndian)
+      twobyte = file.read_bytes(UInt16, IO::ByteFormat::BigEndian)
     rescue IO::EOFError
       break
     end
@@ -123,7 +123,7 @@ def execute_trap(instruction : UInt16) : Bool
 
   quit : Bool = false
   case TrapCode.new(instruction & 0xFF)
-  when TrapCode::Getc
+  when TrapCode::GetC
     input_charcode = gets(1).not_nil!.byte_at(0).to_u16
     REGISTER_STORAGE[Register::R0.value] = input_charcode
   when TrapCode::Out
@@ -186,28 +186,11 @@ def dispatch
 
   running : Bool = true
   while running
-    # puts "Bef #{REGISTER_STORAGE[Register::ProgramCounter.value]}"
-
     instruction = read_memory(REGISTER_STORAGE[Register::ProgramCounter.value])
     REGISTER_STORAGE[Register::ProgramCounter.value] += 1
     operator = instruction >> 12
 
-    # puts Instruction.new(instruction)
-    # STDOUT.flush
-
     case Instruction.new(operator)
-    when Instruction::BR
-      n_flag : UInt16 = (instruction >> 11) & 0x1
-      z_flag : UInt16 = (instruction >> 10) & 0x1
-      p_flag : UInt16 = (instruction >> 9) & 0x1
-
-      pc_offset = sign_extend(instruction & 0x1FF, 9)
-
-      if (n_flag != 0 && (REGISTER_STORAGE[Register::Conditional.value] & ConditionFlag::NEG.value) != 0) ||
-         (z_flag != 0 && (REGISTER_STORAGE[Register::Conditional.value] & ConditionFlag::ZERO.value) != 0) ||
-         (p_flag != 0 && (REGISTER_STORAGE[Register::Conditional.value] & ConditionFlag::POS.value) != 0)
-        REGISTER_STORAGE[Register::ProgramCounter.value] += pc_offset
-      end
     when Instruction::ADD
       dr = (instruction >> 9) & 0x7
       sr1 = (instruction >> 6) & 0x7
@@ -241,7 +224,20 @@ def dispatch
       sr = (instruction >> 6) & 0x7
 
       REGISTER_STORAGE[dr] = ~REGISTER_STORAGE[dr]
+      
       update_flags(dr)
+    when Instruction::BR
+      n_flag : UInt16 = (instruction >> 11) & 0x1
+      z_flag : UInt16 = (instruction >> 10) & 0x1
+      p_flag : UInt16 = (instruction >> 9) & 0x1
+
+      pc_offset = sign_extend(instruction & 0x1FF, 9)
+
+      if (n_flag != 0 && (REGISTER_STORAGE[Register::Conditional.value] & ConditionFlag::NEG.value) != 0) ||
+         (z_flag != 0 && (REGISTER_STORAGE[Register::Conditional.value] & ConditionFlag::ZERO.value) != 0) ||
+         (p_flag != 0 && (REGISTER_STORAGE[Register::Conditional.value] & ConditionFlag::POS.value) != 0)
+        REGISTER_STORAGE[Register::ProgramCounter.value] += pc_offset
+      end
     when Instruction::JMP
       base_r = (instruction >> 6) & 0x7
 
@@ -281,7 +277,7 @@ def dispatch
 
       offset = sign_extend(instruction & 0x3F, 6)
 
-      REGISTER_STORAGE[dr] = read_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + offset)
+      REGISTER_STORAGE[dr] = read_memory(REGISTER_STORAGE[base_r] + offset)
 
       update_flags(dr)
     when Instruction::LEA
@@ -290,6 +286,7 @@ def dispatch
       pc_offset = sign_extend(instruction & 0x1FF, 9)
 
       REGISTER_STORAGE[dr] = REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset
+      update_flags(dr)
     when Instruction::ST
       sr = (instruction >> 9) & 0x7
 
@@ -309,16 +306,17 @@ def dispatch
 
       pc_offset = sign_extend(instruction & 0x3F, 6)
 
-      write_memory(REGISTER_STORAGE[Register::ProgramCounter.value] + pc_offset, REGISTER_STORAGE[sr])
+      # TODO
+      # overflow error
+      # p "adding #{REGISTER_STORAGE[base_r]} + #{pc_offset}"
+
+      write_memory(REGISTER_STORAGE[base_r] + pc_offset, REGISTER_STORAGE[sr])
     when Instruction::TRAP
       running = !execute_trap(instruction)
     when Instruction::RES
     when Instruction::RTI
     else
       exit
-    end
-    if Instruction.new(instruction) != Instruction::BR
-      puts "Instruction #{Instruction.new(instruction)}"
     end
   end
 end
@@ -335,10 +333,16 @@ stdin : Int32 = 0
 
 # Set Termios
 term : LibC::Termios = LibC::Termios.new
+
+LibC.tcgetattr(stdin, pointerof(term))
+
 term.c_iflag &= LibC::IGNBRK | LibC::BRKINT | LibC::PARMRK | LibC::ISTRIP | LibC::INLCR | LibC::IGNCR | LibC::ICRNL | LibC::IXON
 term.c_lflag &= ~(LibC::ICANON | LibC::ECHO)
+
+LibC.tcsetattr(stdin, LibC::TCSANOW, pointerof(term))
 
 dispatch()
 
 # Reset termios data
+term.c_lflag = 0
 LibC.tcsetattr(stdin, LibC::TCSANOW, pointerof(term))
